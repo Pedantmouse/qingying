@@ -1,9 +1,9 @@
-# Qingying · 轻盈计划
+# Qingying — Lightness Plan
 
 > A weight-management app for Chinese home-style fat-loss cooking and home workouts.
 > Runs as an installable PWA in any mobile browser, and can be packaged into a standalone Android APK.
 
-**🌐 Language / 语言: English | [简体中文](README.zh-CN.md)**
+**🌐 Language: English | [Chinese (Simplified)](README.zh-CN.md)**
 
 ---
 
@@ -21,7 +21,7 @@
 
 ## What is Qingying
 
-Qingying (Chinese: 轻盈计划, "Lightness Plan") is a single-page web app for people who want to lose
+Qingying ("Lightness Plan") is a single-page web app for people who want to lose
 fat while eating ordinary Chinese home cooking — rice, stir-fries, soups, dumplings — rather than
 salads and chicken breast. It tracks what you eat, how much you weigh, and whether you moved today,
 with a food database of **100 Chinese home-style dishes** measured in grams.
@@ -31,27 +31,27 @@ no backend). All data lives in the browser's `localStorage` on your own device.
 
 ## Features
 
-**Today / 今日**
+**Today**
 - Calorie ring for the day, with a target derived from your body data
 - Check-ins for meals, workouts, weight and water
 - Suggested fat-loss meal of the day, loggable in one tap
 - Reminder banners for meal times and workout time
 - Voice read-out 🔊 of today's calories, protein, weight and workout status
 
-**Food log / 记餐**
+**Food log**
 - Pick a category → pick a food → pick a gram amount, calories and protein are computed automatically
 - Manual entry with free-form text
 - AI photo recognition (see below)
 - Native voice input (see below)
 - Attach a photo as evidence for a meal
 
-**Records / 记录**
-- Weight in *jin* (斤, 1 jin = 500 g), with a trend line
+**Records**
+- Weight in *jin* (a Chinese unit, 1 jin = 500 g), with a trend line
 - 14-day calorie intake bar chart
 - Browse the diet history by date
 - Attach a photo of the scale
 
-**Plan / 计划**
+**Plan**
 - Weekly workout plan
 - Weekly fat-loss meal plan
 - Personal settings (sex, age, height, weight, goal weight, activity level, calorie deficit)
@@ -66,9 +66,9 @@ Since v2.0 you can point the camera at a meal, and the app sends the photo to a 
 returns the **food name, estimated weight in grams, calories and protein**. You can then adjust the
 grams and the calories are recalculated proportionally before you save the entry.
 
-- Default model: **`glm-4.6v-flash`** by Zhipu AI (智谱), which is **free** for everyday use
-- **You need your own API key.** Register at [open.bigmodel.cn](https://open.bigmodel.cn), create an
-  API key, and paste it into the app under **Plan → Settings → Photo recognition**
+- A free AI vision model is used by default, at no cost for everyday use
+- **You need your own API key.** Register at [open.bigmodel.cn](https://open.bigmodel.cn) (free tier),
+  create an API key, and paste it into the app under **Plan → Settings → Photo recognition**
 - The endpoint URL and model name are configurable in the same screen, so any OpenAI-compatible
   vision API can be used instead
 - Without a key, the app shows a short setup guide and everything else keeps working normally
@@ -85,11 +85,11 @@ v2.0 replaces the old web-only implementations with **Capacitor native plugins**
 | 🎤 Voice input | [`@capacitor-community/speech-recognition`](https://github.com/capacitor-community/speech-recognition) | The Web Speech API is not available inside an app WebView, so the button never appeared. The native plugin calls the phone's built-in speech engine (available on HarmonyOS) instead. |
 | 🔊 Voice output | Web Speech Synthesis | Works everywhere, no change needed. |
 
-Spoken input is parsed into grams automatically: saying "米饭一碗" ("a bowl of rice") fills in
-**rice, 150 g**. Chinese numerals and measure words (碗/盘/个/两/斤 …) are converted using a
-per-category lookup table.
+Spoken input is parsed into grams automatically: saying "one bowl of rice" fills in
+**rice, 150 g**. Chinese numerals and measure words (bowl / plate / piece / liang / jin …) are
+converted using a per-category lookup table.
 
-**Weight unit note:** body weight is stored in *jin* (斤), the Chinese unit equal to 500 g.
+**Weight unit note:** body weight is stored in *jin*, the Chinese unit equal to 500 g.
 Food weights are always in grams.
 
 ## Building the Android APK
@@ -192,4 +192,4 @@ On Android Chrome you can then use **Add to Home screen** to install it like a n
 
 ---
 
-**简体中文文档请见 [README.zh-CN.md](README.zh-CN.md)。**
+**Chinese documentation: [README.zh-CN.md](README.zh-CN.md).**
