@@ -1,98 +1,195 @@
-# 轻盈计划
+# Qingying · 轻盈计划
 
-一个中式家常减脂 + 居家运动的体重管理 PWA 网页应用，可在手机浏览器中"添加到桌面"当 App 使用，也可以一键打包成真正的安卓 APK 安装包。
+> A weight-management app for Chinese home-style fat-loss cooking and home workouts.
+> Runs as an installable PWA in any mobile browser, and can be packaged into a standalone Android APK.
 
-## 功能亮点
+**🌐 Language / 语言: English | [简体中文](README.zh-CN.md)**
 
-- **今日**：热量环、三餐/运动/体重/喝水打卡、今日运动、今日减脂餐建议（一键记入）、饭点和运动提醒横幅、🔊 语音播报
-- **记餐**：选分类 → 选食物 → 点分量（一碗/半碗/一盘/二两……），自动换算热量和蛋白质；也可手动输入；支持📷 拍照凭证、🎤 语音输入
-- **记录**：体重（斤）、体重趋势图、近14天摄入柱状图、按日期查看饮食历史；体重记录可附📷 体重秤照片
-- **计划**：一周运动计划、一周减脂餐、个人设置、备份/恢复；运动打卡可附📷 照片
+---
 
-数据全部保存在手机浏览器本地（localStorage），可在「计划 → 设置 → 备份与恢复」导出备份码。
+## Table of Contents
 
-## 安卓 APP 打包指南
+- [What is Qingying](#what-is-qingying)
+- [Features](#features)
+- [AI food photo recognition](#ai-food-photo-recognition)
+- [Camera & voice input](#camera--voice-input)
+- [Building the Android APK](#building-the-android-apk)
+- [Deploying as a PWA](#deploying-as-a-pwa)
+- [Project structure](#project-structure)
+- [Android permissions](#android-permissions)
+- [Privacy](#privacy)
 
-本项目本身就是一个完整的 PWA，可以直接通过浏览器"添加到桌面"作为 APP 使用。如果需要生成可独立分发的 **APK 安装包**（可在任意安卓手机上安装，无需浏览器），按以下步骤操作：
+## What is Qingying
 
-### 方式 1：用 PWA Builder（推荐，无需安装开发环境）
+Qingying (Chinese: 轻盈计划, "Lightness Plan") is a single-page web app for people who want to lose
+fat while eating ordinary Chinese home cooking — rice, stir-fries, soups, dumplings — rather than
+salads and chicken breast. It tracks what you eat, how much you weigh, and whether you moved today,
+with a food database of **100 Chinese home-style dishes** measured in grams.
 
-1. **先部署 PWA 到 GitHub Pages**（见下方"部署"章节），保证可以在线访问，例如 https://janeysisuer.github.io/qingying/
-2. 用电脑浏览器访问 **https://www.pwabuilder.com/**
-3. 在输入框粘贴上面的 PWA URL，点击 **Start**
-4. 等待分析完成（绿色勾表示 OK），点击 **Build My PWA**
-5. 在弹窗中选择 **Android Package (APK)** → 选择签名方式（建议选 **New Key** 让它自动生成）
-6. 下载生成的 `.apk` 文件
-7. 把 APK 传到安卓手机（微信/QQ/邮件/U 盘均可）
-8. 在手机上点击 APK 安装，系统会提示"未知来源"，按提示允许即可
-9. 安装完成后即可像原生 APP 一样使用，可拍照、可语音输入
+The whole app is a static bundle (HTML + CSS + vanilla JavaScript, no build step, no framework,
+no backend). All data lives in the browser's `localStorage` on your own device.
 
-> 打包前请确保 `manifest.json`、`sw.js`、`icons/` 都在线可访问。
+## Features
 
-### 方式 2：用 Bubblewrap CLI（适合开发者，需要 Node.js）
+**Today / 今日**
+- Calorie ring for the day, with a target derived from your body data
+- Check-ins for meals, workouts, weight and water
+- Suggested fat-loss meal of the day, loggable in one tap
+- Reminder banners for meal times and workout time
+- Voice read-out 🔊 of today's calories, protein, weight and workout status
+
+**Food log / 记餐**
+- Pick a category → pick a food → pick a gram amount, calories and protein are computed automatically
+- Manual entry with free-form text
+- AI photo recognition (see below)
+- Native voice input (see below)
+- Attach a photo as evidence for a meal
+
+**Records / 记录**
+- Weight in *jin* (斤, 1 jin = 500 g), with a trend line
+- 14-day calorie intake bar chart
+- Browse the diet history by date
+- Attach a photo of the scale
+
+**Plan / 计划**
+- Weekly workout plan
+- Weekly fat-loss meal plan
+- Personal settings (sex, age, height, weight, goal weight, activity level, calorie deficit)
+- Backup & restore via an exportable backup code
+
+Every food entry stores **kcal and protein per 100 g** plus a few common portion sizes
+(50 / 100 / 150 / 200 / 300 g), so you can either tap a preset or type any weight you like.
+
+## AI food photo recognition
+
+Since v2.0 you can point the camera at a meal, and the app sends the photo to a vision model that
+returns the **food name, estimated weight in grams, calories and protein**. You can then adjust the
+grams and the calories are recalculated proportionally before you save the entry.
+
+- Default model: **`glm-4.6v-flash`** by Zhipu AI (智谱), which is **free** for everyday use
+- **You need your own API key.** Register at [open.bigmodel.cn](https://open.bigmodel.cn), create an
+  API key, and paste it into the app under **Plan → Settings → Photo recognition**
+- The endpoint URL and model name are configurable in the same screen, so any OpenAI-compatible
+  vision API can be used instead
+- Without a key, the app shows a short setup guide and everything else keeps working normally
+
+> The photo is only sent when you tap the recognition button. Nothing is uploaded in the background.
+
+## Camera & voice input
+
+v2.0 replaces the old web-only implementations with **Capacitor native plugins**:
+
+| Capability | Implementation | Why it changed |
+| --- | --- | --- |
+| 📷 Camera | [`@capacitor/camera`](https://capacitorjs.com/docs/apis/camera) | The HTML `<input capture>` trick silently fails on HarmonyOS / Huawei WebViews. The native plugin opens the system camera reliably and offers "take photo / choose from gallery". |
+| 🎤 Voice input | [`@capacitor-community/speech-recognition`](https://github.com/capacitor-community/speech-recognition) | The Web Speech API is not available inside an app WebView, so the button never appeared. The native plugin calls the phone's built-in speech engine (available on HarmonyOS) instead. |
+| 🔊 Voice output | Web Speech Synthesis | Works everywhere, no change needed. |
+
+Spoken input is parsed into grams automatically: saying "米饭一碗" ("a bowl of rice") fills in
+**rice, 150 g**. Chinese numerals and measure words (碗/盘/个/两/斤 …) are converted using a
+per-category lookup table.
+
+**Weight unit note:** body weight is stored in *jin* (斤), the Chinese unit equal to 500 g.
+Food weights are always in grams.
+
+## Building the Android APK
+
+> ⚠️ **Important:** because v2.0 depends on native plugins, TWA-based wrappers such as
+> **PWABuilder and Bubblewrap cannot produce a working APK** — a TWA runs inside Chrome and has no
+> access to native camera or speech APIs. Use **Capacitor**.
+
+### Prerequisites
+
+- Node.js 18+
+- **JDK 21** (Capacitor 8 requires Java 21 to compile)
+- Android SDK with `platforms;android-36` and `build-tools;36.0.0`
+- A keystore for signing release builds
+
+### Steps
 
 ```bash
-# 安装
-npm install -g @bubblewrap/cli
+# 1. Create the Capacitor project (once)
+mkdir qingying-android && cd qingying-android
+npm init -y
+npm install @capacitor/core @capacitor/cli @capacitor/android
+npm install @capacitor/camera @capacitor-community/speech-recognition
 
-# 初始化项目（在本仓库根目录执行）
-bubblewrap init --manifest https://janeysisuer.github.io/qingying/manifest.json
+# 2. Copy the web app into www/ and create capacitor.config.json
+#    (appId com.qingying.app, webDir "www", plugins.CapacitorHttp.enabled = true)
 
-# 按 prompt 回答应用名、包名（如 com.janeysisuer.qingying）、签名信息
+# 3. Generate the Android project (once)
+npx cap add android
 
-# 构建 APK
-bubblewrap build
-
-# 生成的 APK 在 app-release-signed.apk
+# 4. Sync web assets + plugins, then build
+npx cap sync android
+cd android
+./gradlew assembleRelease
 ```
 
-### 安卓权限说明
+The signed APK ends up in
+`android/app/build/outputs/apk/release/app-release.apk`.
 
-打包后的 APK 在安装/使用时会请求以下权限（由 PWA Builder 的 TWA wrapper 自动声明，对应 Web API 调用）：
+**Two gotchas worth knowing:**
 
-| 权限 | 用途 |
+1. **`CapacitorHttp` must be enabled** in `capacitor.config.json`. Otherwise the AI request from
+   inside the WebView is blocked by CORS. The native HTTP layer bypasses it.
+2. **Declare the speech service in `AndroidManifest.xml`.** Android 11+ package visibility rules
+   hide the system speech recogniser unless you add:
+
+   ```xml
+   <queries>
+     <intent><action android:name="android.speech.RecognitionService" /></intent>
+   </queries>
+   ```
+
+   Without it, `SpeechRecognizer` reports itself as unavailable and voice input silently breaks.
+
+When bumping a version, remember to increase **`versionCode`** as well as `versionName`, or Android
+will refuse to install the update over the previous build.
+
+## Deploying as a PWA
+
+The app needs no server — any static host works. On GitHub:
+
+**Settings → Pages → Build and deployment → Source: Deploy from a branch → `main` / `(root)`**,
+then open `https://<your-username>.github.io/qingying/`.
+
+On Android Chrome you can then use **Add to Home screen** to install it like a native app.
+
+> After changing any code, bump the `CACHE` constant in `sw.js` (e.g. `qingying-v3` → `qingying-v4`)
+> so installed clients pick up the new version.
+
+## Project structure
+
+| File | Purpose |
 | --- | --- |
-| `CAMERA` | 📷 食物拍照凭证 / 体重秤拍照 / 运动打卡拍照 |
-| `RECORD_AUDIO` | 🎤 语音输入（说"米饭一碗"自动填入） |
-| `INTERNET` | 🔄 语音识别服务联网（Google 服务器）+ 在线更新 |
-| `VIBRATE` | 🔔 饭点/运动提醒通知 |
-| `WRITE_EXTERNAL_STORAGE` | 💾 备份码导出到文件（部分版本） |
+| `index.html` | Page skeleton (includes the photo viewer and camera input) |
+| `styles.css` | Styles — automatic light/dark theme, photo/voice/speech UI |
+| `data.js` | Food database, workout plan, fat-loss meal plan |
+| `app.js` | Application logic — logging, charts, camera, speech, AI recognition |
+| `manifest.json` | PWA metadata and home-screen shortcuts |
+| `sw.js` | Service worker for offline use |
+| `icons/` | App icons (192 / 512, including maskable) |
 
-> 这些权限不会主动收集任何个人数据，仅用于应用本身的功能。语音识别通过 Google 在线服务，需联网使用；拍照和语音数据全部保存在本机，不上传任何服务器。
+## Android permissions
 
-## 拍照 / 语音功能说明
-
-### 拍照功能（3 种场景）
-1. **食物拍照凭证**：在「记餐」页 → 点选食物后 → 选分量前 → 点「📷 先拍照再选分量」，照片会附加到该条饮食记录；或在「手动输入」区点「📷 拍食物照」
-2. **体重秤拍照**：在「今日」点「⚖️ 体重」或「记录」页 → 在弹窗中点「📷 拍体重秤」，照片会附在体重记录上
-3. **运动打卡拍照**：在「今日」页运动卡片 → 点「📷 拍照打卡」，照片自动保存并标记运动完成
-
-所有照片经 Canvas 压缩（最大宽度 800px，JPEG 质量 0.7，单张约 30-100KB），保存在 localStorage 中，会随备份码一起导出/恢复。
-
-### 语音功能
-- **语音输入**：在「记餐」页「手动输入」区点「🎤 语音输入」→ 说"米饭一碗"、"二两鸡胸肉"等口语，系统自动识别并填入食物名称和分量，复用食物库进行热量估算
-- **语音播报**：在「今日」页右上角点「🔊 播报」→ 用语音读出今日热量摄入、蛋白质情况、体重、运动完成情况
-
-### 兼容性提示
-- 📷 拍照：所有现代 Android 浏览器（Chrome / Edge / 华为浏览器 / 小米浏览器）都支持；iOS Safari 也支持
-- 🎤 语音输入：Android Chrome、Edge 完全支持；部分国产浏览器（如华为浏览器旧版）可能不支持，按钮会自动隐藏或提示
-- 🔊 语音播报：所有现代浏览器都支持
-
-## 部署（GitHub Pages）
-
-仓库 Settings → Pages → Build and deployment → Source 选 **Deploy from a branch**，Branch 选 **main** / **(root)**，保存。
-几分钟后访问：https://janeysisuer.github.io/qingying/
-
-## 文件说明
-
-| 文件 | 作用 |
+| Permission | Used for |
 | --- | --- |
-| `index.html` | 页面骨架（含照片查看器和相机 input） |
-| `styles.css` | 样式（浅色/深色自动切换 + 拍照/语音/播报样式） |
-| `data.js` | 食物库、运动计划、减脂餐计划 |
-| `app.js` | 应用逻辑（含拍照/语音/播报功能） |
-| `manifest.json` | PWA 安装信息（含 shortcuts 快捷方式） |
-| `sw.js` | Service Worker（离线可用） |
-| `icons/` | 应用图标（192/512，含 maskable） |
+| `CAMERA` | 📷 Photo evidence for meals, scale readings and workouts |
+| `RECORD_AUDIO` | 🎤 Voice input |
+| `INTERNET` | 🤖 Sending a photo to the AI service when you tap recognition |
+| `VIBRATE`, `POST_NOTIFICATIONS` | 🔔 Meal-time and workout reminders |
+| `WRITE_EXTERNAL_STORAGE` / `READ_EXTERNAL_STORAGE` (maxSdkVersion 32) | 💾 Exporting the backup code to a file on Android 12 and below |
 
-> 更新代码后，请把 `sw.js` 里的 `CACHE` 版本号加 1（如 `qingying-v3`），手机上才会拿到新版本。
+## Privacy
+
+- All data — meals, weight, workouts, photos and settings — is stored **only on your device** in
+  `localStorage`. There is no account, no server, no analytics and no telemetry.
+- Photos are compressed locally (max width 800 px, JPEG quality 0.7) and never leave the device,
+  except the one photo you explicitly submit for AI recognition.
+- Your AI API key is stored in `localStorage` on your own device and is sent only to the endpoint you
+  configure.
+
+---
+
+**简体中文文档请见 [README.zh-CN.md](README.zh-CN.md)。**
