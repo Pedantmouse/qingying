@@ -20,8 +20,17 @@ const slotName = (key) => (MEAL_SLOTS.find((s) => s.key === key) || {}).name || 
 const dayLabel = (k) => (k === dateKey() ? '今天' : k === addDays(dateKey(), -1) ? '昨天' : fmtMD(k));
 
 /* ---------- 拍照 / 语音 / 播报 工具函数 ---------- */
-const supportsCamera = () => !!document.getElementById('cameraInput');
-const supportsSpeechRec = () => !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+/* 是否运行在 Capacitor 原生壳里（安卓 APK） */
+const isNativeApp = () => !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
+/* 取原生插件实例（浏览器里或未安装插件时为 null） */
+const capPlugin = (name) => (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins[name]) || null;
+const CapCamera = () => capPlugin('Camera');
+const CapSpeech = () => capPlugin('SpeechRecognition');
+
+/* 相机：原生插件优先（华为/鸿蒙上 HTML 的 <input capture> 常常唤不起相机），否则回退到文件选择器 */
+const supportsCamera = () => !!CapCamera() || !!document.getElementById('cameraInput');
+/* 语音识别：原生插件优先（App 内置浏览器里 Web Speech API 通常不可用），否则回退到 Web Speech */
+const supportsSpeechRec = () => !!CapSpeech() || !!(window.SpeechRecognition || window.webkitSpeechRecognition);
 const supportsSpeechSyn = () => typeof window.speechSynthesis !== 'undefined' && typeof window.SpeechSynthesisUtterance !== 'undefined';
 
 /* 压缩图片为 base64（最大宽度 800px、JPEG 0.7），单张约 30-100KB */
@@ -49,20 +58,50 @@ function compressImage(file, maxSize = 800, quality = 0.7) {
   });
 }
 
-/* 统一拍照入口：调用 #cameraInput 文件选择器，回调返回压缩后 base64
- * 用途：避免在每处都写 <input>，复用同一 input 元素
- * 调用方式：takePhoto((b64) => { ... }) */
+/* 统一拍照入口
+ * 优先调用原生相机插件（华为/鸿蒙上可正常唤起相机与相册），失败再回退到 <input capture>
+ * 回调参数：拿到照片 = dataURL 字符串；用户取消或失败 = null
+ * 调用方式：takePhoto((dataUrl) => { ... }) */
 let _cameraCb = null;
-function takePhoto(cb) {
+function takePhotoFallback(cb) {
   const input = document.getElementById('cameraInput');
-  if (!input) { toast('当前浏览器不支持拍照'); return; }
+  if (!input) { toast('当前环境不支持拍照'); cb && cb(null); return; }
   _cameraCb = cb;
   input.value = '';
   input.click();
 }
+async function takePhoto(cb) {
+  const Camera = CapCamera();
+  if (Camera) {
+    try {
+      const photo = await Camera.getPhoto({
+        quality: 70,
+        allowEditing: false,
+        resultType: 'dataUrl',   // 直接拿到 data:image/jpeg;base64,xxx
+        source: 'PROMPT',        // 弹出「拍照 / 从相册选择」
+        width: 900,
+        correctOrientation: true,
+        saveToGallery: false,
+        promptLabelHeader: '添加照片',
+        promptLabelPhoto: '从相册选择',
+        promptLabelPicture: '拍照',
+        promptLabelCancel: '取消'
+      });
+      if (photo && photo.dataUrl) { cb && cb(photo.dataUrl); return; }
+      cb && cb(null);
+      return;
+    } catch (err) {
+      const msg = String((err && (err.message || err.errorMessage)) || err || '');
+      if (/cancel/i.test(msg)) { cb && cb(null); return; }  // 用户主动取消，静默返回
+      takePhotoFallback(cb);                                // 原生失败，退回文件选择器
+      return;
+    }
+  }
+  takePhotoFallback(cb);
+}
 document.getElementById('cameraInput')?.addEventListener('change', async (e) => {
   const file = e.target.files && e.target.files[0];
-  if (!file) { _cameraCb = null; return; }
+  if (!file) { _cameraCb && _cameraCb(null); _cameraCb = null; return; }
   try {
     const b64 = await compressImage(file);
     if (_cameraCb) _cameraCb(b64);
@@ -82,11 +121,11 @@ function closePhotoViewer() {
   if (v) { v.hidden = true; v.innerHTML = ''; }
 }
 
-/* 语音输入：解析中文口语 "米饭一碗" -> {name, portion, cat?}
- * 最长食物名优先匹配；分量用正则提取，复用 parsePortion 的 unit 关键字 */
+/* 语音输入：解析中文口语 "米饭一碗" -> { name, grams, cat }
+ * 最长食物名优先匹配；分量统一折算成「克」 */
 function parseVoiceInput(text) {
   const t = String(text || '').replace(/\s+/g, '').trim();
-  if (!t) return { name: '', portion: '一份' };
+  if (!t) return { name: '', grams: 0, cat: '' };
   let bestName = '', bestCat = '', bestLen = 0;
   FOOD_CATEGORIES.forEach((c) => (FOODS[c.key] || []).forEach((f) => {
     const n = f.name.replace(/\(.*?\)/g, '');
@@ -94,30 +133,99 @@ function parseVoiceInput(text) {
       bestName = n; bestCat = c.key; bestLen = n.length;
     }
   }));
-  // 提取分量："半碗"、"一碗"、"二两"、"半盘"、"一个"、"一盘" 等
-  let portion = '一份';
-  if (bestName) {
-    const idx = t.indexOf(bestName);
-    const rest = t.slice(0, idx) + t.slice(idx + bestName.length);
-    const m = rest.match(/[半一二两俩三四五六七八九十\d.]+\s*[碗盘份个根杯盒块片勺把只串瓶罐条张口点斤两]/);
-    if (m) portion = m[0];
-  } else if (t.length <= 8) {
-    // 没匹配到食物库，整个串当作食物名（截断）
-    bestName = t.slice(0, 12);
-  }
-  return { name: bestName, portion, cat: bestCat };
+  const grams = speechToGrams(t, bestCat);
+  if (!bestName && t.length <= 8) bestName = t.slice(0, 12);
+  return { name: bestName, grams, cat: bestCat };
 }
 
-/* 启动一次语音识别，识别成功后回调 text */
-let _recognition = null;
-function startVoiceRec(onResult, onEnd) {
+/* 中文数字 → 阿拉伯数字（支持 半 / 一 / 两 / 十五 / 二十二 等常见说法） */
+function cnNum(s) {
+  s = String(s || '').trim();
+  if (!s) return 1;
+  if (/^\d+(\.\d+)?$/.test(s)) return parseFloat(s);
+  const CN = { 零: 0, 一: 1, 二: 2, 两: 2, 俩: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (s === '半') return 0.5;
+  if (s === '十') return 10;
+  if (s[0] === '十') return 10 + (CN[s[1]] || 0);
+  if (s[1] === '十') return (CN[s[0]] || 0) * 10 + (CN[s[2]] || 0);
+  return CN[s[0]] != null ? CN[s[0]] : 1;
+}
+
+/* 把口语分量折算成克：① 先说克的直接取；② 斤/两换算；③ 「一碗/一盘/一个」按经验值 */
+function speechToGrams(text, cat) {
+  const t = String(text || '');
+  let m = t.match(/(\d+(?:\.\d+)?)\s*(?:克|公克|g|G)\b/) || t.match(/(\d+(?:\.\d+)?)\s*(?:克|公克)/);
+  if (m) return Math.round(parseFloat(m[1]));
+  m = t.match(/([半一二两俩三四五六七八九十\d.]+)\s*(公斤|千克|斤|两)/);
+  if (m) {
+    const n = cnNum(m[1]), u = m[2];
+    if (u === '斤') return Math.round(n * 500);
+    if (u === '两') return Math.round(n * 50);
+    return Math.round(n * 1000);
+  }
+  m = t.match(/([半一二两俩三四五六七八九十\d.]+)\s*([碗盘碟份个根杯盒块片勺把只串瓶罐条])/);
+  if (m) {
+    const n = cnNum(m[1]);
+    const info = SPEECH_UNIT_GRAMS[m[2]];
+    if (info) {
+      const base = (cat && info[cat] != null) ? info[cat] : info.def;
+      return Math.round(base * n);
+    }
+  }
+  return 0;
+}
+
+/* 启动一次语音识别，识别成功后回调 text
+ * 优先用 Capacitor 原生插件（App 内置浏览器里 Web Speech API 基本不可用，
+ * 华为/鸿蒙设备更是没有 Google 语音服务），失败再回退到 Web Speech API */
+let _recognition = null;      // Web Speech 实例
+let _nativeSpeechOn = false;  // 原生插件是否正在监听
+
+/* 原生语音识别：走系统 SpeechRecognizer（华为设备由系统自带语音引擎提供） */
+async function startVoiceRecNative(onResult, onEnd) {
+  const SR = CapSpeech();
+  if (!SR) return false;
+  try {
+    const perm = await SR.requestPermissions();
+    if (perm && perm.speechRecognition && perm.speechRecognition !== 'granted') { toast('请允许麦克风权限'); return false; }
+  } catch (e) { /* 旧版本无此方法，忽略 */ }
+  try {
+    const av = await SR.available();
+    if (av && av.available === false) return false;   // 设备没有语音识别服务
+  } catch (e) { return false; }
+  try { await SR.removeAllListeners(); } catch (e) {}
+  let lastText = '', done = false;
+  const finish = () => {
+    if (done) return;
+    done = true; _nativeSpeechOn = false;
+    if (lastText) onResult && onResult(lastText);
+    else toast('没听到声音，请再说一次');
+    try { SR.removeAllListeners(); } catch (e) {}
+    onEnd && onEnd();
+  };
+  try {
+    await SR.addListener('partialResults', (data) => {
+      const txt = (data && data.matches && data.matches[0]) || '';
+      if (txt) lastText = txt;
+    });
+    await SR.addListener('listeningState', (data) => { if (data && data.status === 'stopped') finish(); });
+    _nativeSpeechOn = true;
+    await SR.start({ language: 'zh-CN', maxResults: 1, partialResults: true, popup: false });
+  } catch (e) { _nativeSpeechOn = false; return false; }
+  /* 兜底：最多听 12 秒，超时自动收尾 */
+  setTimeout(() => { if (_nativeSpeechOn) { try { SR.stop(); } catch (e) {} setTimeout(finish, 600); } }, 12000);
+  return true;
+}
+
+/* Web Speech API 版本（电脑浏览器里可用） */
+function startVoiceRecWeb(onResult, onEnd) {
   const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!Rec) { toast('当前浏览器不支持语音输入（建议用 Chrome）'); onEnd && onEnd(); return; }
+  if (!Rec) { toast('当前环境不支持语音输入'); onEnd && onEnd(); return; }
   if (_recognition) { try { _recognition.stop(); } catch (e) {} _recognition = null; }
   const r = new Rec();
   r.lang = 'zh-CN'; r.continuous = false; r.interimResults = false; r.maxAlternatives = 1;
   r.onresult = (e) => {
-    const text = e.results && e.results[0] && e.results[0][0] && e.results[0][0].transcript || '';
+    const text = (e.results && e.results[0] && e.results[0][0] && e.results[0][0].transcript) || '';
     onResult && onResult(text);
   };
   r.onerror = (e) => {
@@ -129,7 +237,18 @@ function startVoiceRec(onResult, onEnd) {
   _recognition = r;
   try { r.start(); } catch (e) { toast('无法启动语音'); onEnd && onEnd(); }
 }
+
+/* 统一入口：原生优先，失败回退 */
+async function startVoiceRec(onResult, onEnd) {
+  try {
+    const ok = await startVoiceRecNative(onResult, onEnd);
+    if (ok) return;
+  } catch (e) { /* 继续回退 */ }
+  startVoiceRecWeb(onResult, onEnd);
+}
 function stopVoiceRec() {
+  const SR = CapSpeech();
+  if (_nativeSpeechOn && SR) { try { SR.stop(); } catch (e) {} _nativeSpeechOn = false; }
   if (_recognition) { try { _recognition.stop(); } catch (e) {} _recognition = null; }
 }
 
@@ -145,12 +264,70 @@ function stopSpeak() {
   if (supportsSpeechSyn()) window.speechSynthesis.cancel();
 }
 
+/* ---------- AI 拍照识别（默认走智谱免费的 GLM-4.6V-Flash） ---------- */
+const AI_PROMPT = [
+  '你是中国家庭的营养师。请仔细看这张饭菜照片，识别出画面里的食物。要求：',
+  '1) 用中式家常菜名（如“西红柿炒鸡蛋”“清炒菠菜”“白米饭”）；',
+  '2) 结合餐具大小估算每种食物的可食重量，单位：克；',
+  '3) 按中国食物成分表估算热量（千卡）与蛋白质（克）。',
+  '只输出 JSON，不要任何解释文字、不要 markdown 代码块，格式：',
+  '{"items":[{"name":"食物名","grams":克数,"kcal":热量,"protein":蛋白质克数}],"note":"一句提醒"}',
+  '若照片里没有食物，返回 {"items":[],"note":"未识别到食物"}。'
+].join('\n');
+
+async function aiRecognizeFood(dataUrl) {
+  const s = state.settings;
+  const key = String(s.aiKey || '').trim();
+  if (!key) throw new Error('NO_KEY');
+  const endpoint = String(s.aiEndpoint || '').trim() || 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
+  const model = String(s.aiModel || '').trim() || 'glm-4.6v-flash';
+  const base64 = String(dataUrl).replace(/^data:[^;]+;base64,/, '');
+  const payload = {
+    model: model,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'image_url', image_url: { url: base64 } },
+        { type: 'text', text: AI_PROMPT }
+      ]
+    }],
+    temperature: 0.1,
+    max_tokens: 1024
+  };
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) {
+    let detail = '';
+    try { const j = await res.json(); detail = (j && j.error && (j.error.message || j.error.code)) || ''; } catch (e) { /* 忽略 */ }
+    if (res.status === 401) throw new Error('API Key 不正确，请检查后重填');
+    if (res.status === 429) throw new Error('调用太频繁或额度用完，稍后再试');
+    throw new Error('HTTP ' + res.status + (detail ? '：' + detail : ''));
+  }
+  const data = await res.json();
+  const text = (data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
+  return parseAiJson(text);
+}
+
+/* AI 有时会把 JSON 包在 ```json 里或前后带说明文字，这里做容错提取 */
+function parseAiJson(text) {
+  let t = String(text || '').trim();
+  t = t.replace(/^```(?:json)?/i, '').replace(/```\s*$/, '').trim();
+  const a = t.indexOf('{'), b = t.lastIndexOf('}');
+  if (a >= 0 && b > a) t = t.slice(a, b + 1);
+  return JSON.parse(t);
+}
+
 /* ---------- 数据 ---------- */
 const DEFAULT_SETTINGS = {
   sex: 'female', age: 46, height: 161, weight: 111, goalWeight: 104,
   activity: 1.375, deficit: 200,
   breakfastTime: '07:30', lunchTime: '12:00', dinnerTime: '18:00', workoutTime: '19:30',
-  remind: true, notify: false, theme: 'auto'
+  remind: true, notify: false, theme: 'auto',
+  /* 拍照识别（AI）配置：默认用智谱免费的 GLM-4.6V-Flash */
+  aiKey: '', aiModel: 'glm-4.6v-flash', aiEndpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', aiOn: true
 };
 
 function normalize(s) {
@@ -171,7 +348,8 @@ function normalizeDay(d) {
   ['breakfast', 'lunch', 'dinner', 'snack'].forEach((slot) => {
     d.meals[slot] = (d.meals[slot] || []).map((it) => {
       if (!it || typeof it !== 'object') return null;
-      const o = { id: it.id || uid(), name: it.name || '未知', portion: it.portion || '一份', kcal: +it.kcal || 0, protein: +it.protein || 0 };
+      const o = { id: it.id || uid(), name: it.name || '未知', portion: it.portion || '', kcal: +it.kcal || 0, protein: +it.protein || 0 };
+      if (it.grams != null) o.grams = +it.grams || 0;
       if (it.plan) o.plan = true;
       if (it.manual) o.manual = true;
       if (typeof it.photo === 'string' && it.photo) o.photo = it.photo;
@@ -431,7 +609,7 @@ function addPlanMeal(slot, k = dateKey()) {
   const p = MEAL_PLAN[wd][slot];
   const day = getDay(k, true);
   if (day.meals[slot].some((it) => it.plan)) { toast('这一餐已经记过啦'); return; }
-  day.meals[slot].push({ id: uid(), name: p.text, portion: '计划餐一份', kcal: p.kcal, protein: p.protein, plan: true });
+  day.meals[slot].push({ id: uid(), name: p.text, portion: '计划餐 1 份', kcal: p.kcal, protein: p.protein, plan: true });
   save();
   toast(`已记入${slotName(slot)}：约${p.kcal}千卡`);
 }
@@ -476,7 +654,7 @@ function defaultSlot() {
 const logState = { date: dateKey(), slot: defaultSlot(), cat: 'staple', search: '', basket: [] };
 /* pendingPhoto：手动输入区或 pickFood 模态框中临时存放的拍照 base64
  * - manualPhoto：手动输入区拍的，附加到下一条 basket item
- * - foodPhoto：pickFood 模态框拍的，附加到下一条 pickUnit 添加的 basket item */
+ * - foodPhoto：pickFood 模态框拍的，附加到下一条 pickGram 添加的 basket item */
 const pendingPhoto = { manual: '', food: '', weight: '' };
 
 function renderLog() {
@@ -490,6 +668,7 @@ function renderLog() {
       <div class="seg" style="margin-top:10px">
         ${MEAL_SLOTS.map((s) => `<button data-action="logSlot" data-slot="${s.key}" class="${L.slot === s.key ? 'on' : ''}">${s.name}</button>`).join('')}
       </div>
+      ${supportsCamera() ? `<button class="btn ai-btn block" data-action="aiPhoto" style="margin-top:10px">🤖 拍照识别热量（AI）</button>` : ''}
     </div>
     <div id="basketArea"></div>
     <div class="card">
@@ -510,11 +689,11 @@ function renderLog() {
         <label class="field">吃了什么
           <input class="input" id="mName" placeholder="如：西红柿鸡蛋面" maxlength="30">
         </label>
-        <label class="field">吃了多少
-          <input class="input" id="mPortion" placeholder="如：一碗、半盘、二两" maxlength="12" value="一份">
+        <label class="field">吃了多少（克）
+          <input class="input" id="mPortion" type="number" inputmode="numeric" placeholder="如：150" min="1" max="2000" value="100">
         </label>
         <div class="chips">
-          ${['一碗', '半碗', '一盘', '半盘', '一两', '二两', '一个', '半个', '一份'].map((p) => `<button class="chip" data-action="mPortion" data-p="${p}">${p}</button>`).join('')}
+          ${COMMON_GRAMS.map((g) => `<button class="chip" data-action="mPortion" data-p="${g}">${g}克</button>`).join('')}
         </div>
         <label class="field">它更像哪一类？（帮助估算）
           <select class="input" id="mCat">
@@ -556,14 +735,79 @@ function pickFood(cat, i) {
   const f = FOODS[cat][i];
   const hasCam = supportsCamera();
   openModal(`
-    <h3>${f.icon} ${esc(f.name)} · 吃了多少？</h3>
+    <h3>${f.icon} ${esc(f.name)} · 吃了多少克？</h3>
+    <p class="muted small" style="margin:-4px 0 8px">每 100 克约 <b>${f.per100[0]}</b> 千卡 · 蛋白质 ${f.per100[1]} 克${f.hint ? `　（参考：${esc(f.hint)}）` : ''}</p>
     <div class="unit-grid">
-      ${f.units.map((u, j) => `<button data-action="pickUnit" data-cat="${cat}" data-i="${i}" data-j="${j}">${esc(u[0])}</button>`).join('')}
+      ${f.common.map((g) => `<button data-action="pickGram" data-cat="${cat}" data-i="${i}" data-g="${g}">${g} 克</button>`).join('')}
+    </div>
+    <div class="row" style="gap:8px;margin-top:8px">
+      <input class="input grow" id="customGram" type="number" inputmode="numeric" placeholder="其他克数" min="1" max="2000">
+      <button class="btn line" data-action="pickGramCustom" data-cat="${cat}" data-i="${i}">加入</button>
     </div>
     <div id="foodPhotoPreview" class="photo-preview"></div>
-    ${hasCam ? `<button class="photo-btn block" data-action="takeFoodPhoto" id="foodPhotoBtn" data-cat="${cat}" data-i="${i}" style="margin-top:8px">📷 先拍照再选分量</button>` : ''}
+    ${hasCam ? `<button class="photo-btn block" data-action="takeFoodPhoto" id="foodPhotoBtn" data-cat="${cat}" data-i="${i}" style="margin-top:8px">📷 先拍照再选克数</button>` : ''}
     <p class="muted small" style="margin-top:12px">点一下就加入；吃了两份就点两次。</p>
     <button class="btn line block" data-close style="margin-top:6px">完成</button>`);
+}
+
+/* 按克数把食物加入「待记入」 */
+function addFoodByGram(cat, i, grams) {
+  const f = FOODS[cat][i];
+  if (!f || !(grams >= 1)) { toast('克数不对'); return; }
+  const kcal = Math.round(f.per100[0] * grams / 100);
+  const protein = round1(f.per100[1] * grams / 100);
+  const item = { name: f.name, grams, portion: grams + '克', kcal, protein };
+  if (pendingPhoto.food) item.photo = pendingPhoto.food;
+  logState.basket.push(item);
+  toast(`已加入：${f.name} ${grams}克 ≈ ${kcal}千卡${pendingPhoto.food ? ' 📷' : ''}`);
+  pendingPhoto.food = '';
+  const prev = $('#foodPhotoPreview'); if (prev) prev.innerHTML = '';
+  const btn = $('#foodPhotoBtn'); if (btn) { btn.classList.remove('has-photo'); btn.textContent = '📷 先拍照再选克数'; }
+  renderBasket(); renderFab();
+}
+
+/* AI 识别结果确认弹窗（克数可改） */
+let _aiResult = null;
+function aiResultModal(dataUrl, items, note) {
+  _aiResult = { dataUrl, items };
+  openModal(`
+    <h3>🤖 识别结果</h3>
+    <img class="ai-photo" src="${dataUrl}" alt="食物照片">
+    <p class="muted small" style="margin-top:-2px">${note ? esc(note) : '请核对克数，可直接修改。'}</p>
+    <div class="ai-items">
+      ${items.map((it, i) => {
+        const g = Math.max(1, Math.round(+it.grams || 100));
+        return `<div class="ai-item">
+          <input class="input" data-ai-name="${i}" value="${esc(it.name || '')}" placeholder="食物名">
+          <div class="row" style="gap:6px;margin-top:6px">
+            <input class="input" type="number" inputmode="numeric" data-ai-gram="${i}" value="${g}" min="1" max="2000" style="width:92px">
+            <span class="muted small" style="padding-top:8px">克</span>
+            <span class="muted small grow" style="padding-top:8px;text-align:right">约 ${Math.round(+it.kcal || 0)} 千卡 · 蛋白 ${round1(+it.protein || 0)} 克</span>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+    <div class="row" style="gap:8px;margin-top:12px">
+      <button class="btn line grow" data-close>取消</button>
+      <button class="btn grow" data-action="aiResultAdd">✓ 全部加入</button>
+    </div>`);
+}
+
+/* 还没填 API Key 时的引导弹窗 */
+function aiSetupModal() {
+  openModal(`
+    <h3>🤖 拍照识别热量</h3>
+    <p class="muted small">这个功能用 AI 看照片，自动帮你估算食物的克数和热量。需要一个免费的智谱 API Key：</p>
+    <ol class="muted small" style="padding-left:18px">
+      <li>手机浏览器打开 <b>open.bigmodel.cn</b>，手机号注册</li>
+      <li>进入「API Keys」页，新建一个 Key 并复制</li>
+      <li>粘贴到「计划 → 设置 → 拍照识别」里</li>
+    </ol>
+    <p class="muted small">识别用的模型 <b>glm-4.6v-flash</b> 是官方免费模型，日常用不花钱。</p>
+    <div class="row" style="gap:8px;margin-top:12px">
+      <button class="btn line grow" data-close>稍后</button>
+      <button class="btn grow" data-action="aiConfig">去填写</button>
+    </div>`);
 }
 
 function renderBasket() {
@@ -611,47 +855,23 @@ function itemRow(it, k, slot) {
     <button class="icon-btn" data-action="delItem" data-k="${k}" data-slot="${slot}" data-id="${esc(it.id)}" aria-label="删除">🗑️</button></li>`;
 }
 
-/* 手动输入：解析中文分量，估算热量 */
-const CN_NUM = { 半: 0.5, 一: 1, 二: 2, 两: 2, 俩: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
-const UNIT_FACTOR = { 斤: 5, 两: 0.5, 碗: 1, 盘: 1, 份: 1, 个: 1, 根: 1, 杯: 1, 盒: 1, 块: 0.6, 片: 0.4, 勺: 0.4, 把: 0.6, 只: 0.5, 串: 0.8, 瓶: 1.2, 罐: 1, 条: 1, 张: 0.8, 口: 0.15, 点: 0.3 };
-function parsePortion(text) {
-  const t = String(text || '').replace(/\s/g, '');
-  let count = 1;
-  const m = t.match(/(\d+(?:\.\d+)?)/);
-  if (m) count = parseFloat(m[1]);
-  else {
-    const c = t.match(/[半一二两俩三四五六七八九十]/);
-    if (c) count = CN_NUM[c[0]];
-  }
-  if (/小半/.test(t)) count = 0.35;
-  // “两”既可作数字也可作单位：如“二两”“三两”中最后一个“两”是单位
-  let unit = '';
-  const u = t.match(/([斤碗盘份个根杯盒块片勺把只串瓶罐条张口点])/);
-  if (/[一二两三四五六七八九十半\d]两$/.test(t) || t === '两') unit = '两';
-  else if (u) unit = u[1];
-  if (unit === '两' && /^两两?$/.test(t)) count = 1;
-  let factor = count * (UNIT_FACTOR[unit] != null ? UNIT_FACTOR[unit] : 1);
-  if (/大/.test(t)) factor *= 1.5; else if (/小(?!半)/.test(t)) factor *= 0.7;
-  return { count, unit, factor: Math.min(8, Math.max(0.1, factor)) };
-}
-function estimateManual(name, portion, cat) {
-  const p = parsePortion(portion);
-  // 先在食物库里找同名食物，按相同单位换算
+/* 手动输入：按「克」估算热量
+ * ① 先在食物库里找同名食物，用它的每100克数据；② 找不到就按所选分类的均值 */
+function findFoodByName(name) {
+  const n0 = String(name || '').replace(/\(.*?\)/g, '').trim();
+  if (!n0) return null;
   let best = null;
   FOOD_CATEGORIES.forEach((c) => FOODS[c.key].forEach((f) => {
     const n = f.name.replace(/\(.*?\)/g, '');
-    if (name.includes(n) || n.includes(name)) if (!best || n.length > best.n.length) best = { f, n };
+    if ((n0.includes(n) || n.includes(n0)) && (!best || n.length > best.n.length)) best = { f, n };
   }));
-  if (best && p.unit) {
-    const unit = best.f.units.find((u) => u[0] === '一' + p.unit) || best.f.units.find((u) => u[0].endsWith(p.unit) && !/[大小半]/.test(u[0]));
-    if (unit) {
-      let mult = p.unit === '两' ? p.count / (CN_NUM[unit[0][0]] || 1) : p.count;
-      if (/大/.test(portion)) mult *= 1.5; else if (/小(?!半)/.test(portion)) mult *= 0.7;
-      return { kcal: Math.round(unit[1] * mult), protein: round1(unit[2] * mult) };
-    }
-  }
-  const base = MANUAL_BASE[cat] || MANUAL_BASE.other;
-  return { kcal: Math.round(base[0] * p.factor), protein: round1(base[1] * p.factor) };
+  return best ? best.f : null;
+}
+function estimateManual(name, grams, cat) {
+  const g = Math.max(1, Math.min(2000, Math.round(+grams || 0)));
+  const f = findFoodByName(name);
+  const base = f ? f.per100 : (MANUAL_BASE[cat] || MANUAL_BASE.other);
+  return { grams: g, kcal: Math.round(base[0] * g / 100), protein: round1(base[1] * g / 100) };
 }
 
 /* ---------- 记录页 ---------- */
@@ -831,6 +1051,32 @@ function renderPlan() {
       </div>
     </div>
     <div class="card">
+      <h2>🤖 拍照识别（AI）</h2>
+      <p class="muted small" style="margin-top:-4px">拍一张饭菜照片，AI 自动估算克数和热量。用的是智谱免费的 <b>glm-4.6v-flash</b> 模型。</p>
+      <label class="field">智谱 API Key
+        <input class="input" type="password" data-setting="aiKey" value="${esc(s.aiKey || '')}" placeholder="粘贴 open.bigmodel.cn 的 API Key" autocomplete="off" spellcheck="false">
+      </label>
+      <details style="margin-top:6px">
+        <summary class="muted small" style="cursor:pointer">怎么免费获取 API Key？（点开看步骤）</summary>
+        <ol class="muted small" style="padding-left:18px;line-height:1.8">
+          <li>手机浏览器打开 <b>open.bigmodel.cn</b>，用手机号注册登录</li>
+          <li>左侧菜单进入「API Keys」（或「密钥管理」）</li>
+          <li>点「新建 / 创建 API Key」，复制那串字符</li>
+          <li>回到这里粘贴，点一下别处即自动保存</li>
+        </ol>
+        <p class="muted small">glm-4.6v-flash 是官方免费模型，日常使用不花钱。想换别的服务，可在下面改地址和模型名。</p>
+      </details>
+      <details style="margin-top:4px">
+        <summary class="muted small" style="cursor:pointer">高级：接口地址与模型名</summary>
+        <label class="field" style="margin-top:8px">接口地址
+          <input class="input" data-setting="aiEndpoint" value="${esc(s.aiEndpoint || '')}" placeholder="https://open.bigmodel.cn/api/paas/v4/chat/completions" spellcheck="false">
+        </label>
+        <label class="field">模型名
+          <input class="input" data-setting="aiModel" value="${esc(s.aiModel || '')}" placeholder="glm-4.6v-flash" spellcheck="false">
+        </label>
+      </details>
+    </div>
+    <div class="card">
       <h2>💾 备份与恢复</h2>
       <p class="muted small" style="margin-top:-4px">数据只保存在这部手机的浏览器里。换手机或清理浏览器前，请先导出备份码，发到微信“文件传输助手”保存。</p>
       <button class="btn block" data-action="exportData">📤 导出备份码</button>
@@ -944,35 +1190,31 @@ const ACTIONS = {
   logSlot(el) { logState.slot = el.dataset.slot; renderLog(); renderFab(); },
   logCat(el) { logState.cat = el.dataset.cat; logState.search = ''; const s = $('[data-input="foodSearch"]'); if (s) s.value = ''; document.querySelectorAll('.cat-tabs button').forEach((b) => b.classList.toggle('on', b.dataset.cat === logState.cat)); renderFoodArea(); },
   pickFood(el) { pickFood(el.dataset.cat, +el.dataset.i); },
-  pickUnit(el) {
-    const f = FOODS[el.dataset.cat][+el.dataset.i];
-    const u = f.units[+el.dataset.j];
-    const item = { name: f.name, portion: u[0], kcal: u[1], protein: u[2] };
-    if (pendingPhoto.food) { item.photo = pendingPhoto.food; }
-    logState.basket.push(item);
-    toast(`已加入：${f.name} ${u[0]}${pendingPhoto.food ? ' 📷' : ''}`);
-    pendingPhoto.food = '';
-    // 同步更新模态框中的预览
-    const prev = $('#foodPhotoPreview'); if (prev) prev.innerHTML = '';
-    const btn = $('#foodPhotoBtn'); if (btn) { btn.classList.remove('has-photo'); btn.textContent = '📷 先拍照再选分量'; }
-    renderBasket(); renderFab();
+  pickGram(el) { addFoodByGram(el.dataset.cat, +el.dataset.i, +el.dataset.g); },
+  pickGramCustom(el) {
+    const input = $('#customGram');
+    const g = Math.round(+((input && input.value) || 0));
+    if (!(g >= 1 && g <= 2000)) { toast('请输入 1-2000 之间的克数'); if (input) input.focus(); return; }
+    if (input) input.value = '';
+    addFoodByGram(el.dataset.cat, +el.dataset.i, g);
   },
   basketDel(el) { logState.basket.splice(+el.dataset.idx, 1); renderBasket(); renderFab(); },
   mPortion(el) { $('#mPortion').value = el.dataset.p; },
   manualAdd() {
     const name = $('#mName').value.trim();
-    const portion = $('#mPortion').value.trim() || '一份';
+    const grams = Math.round(+($('#mPortion').value || 0));
     if (!name) { toast('请先写上吃了什么'); $('#mName').focus(); return; }
-    const est = estimateManual(name, portion, $('#mCat').value);
-    const item = { name, portion, kcal: est.kcal, protein: est.protein, manual: true };
+    if (!(grams >= 1 && grams <= 2000)) { toast('请填写 1-2000 之间的克数'); $('#mPortion').focus(); return; }
+    const est = estimateManual(name, grams, $('#mCat').value);
+    const item = { name, grams: est.grams, portion: est.grams + '克', kcal: est.kcal, protein: est.protein, manual: true };
     if (pendingPhoto.manual) item.photo = pendingPhoto.manual;
     logState.basket.push(item);
-    $('#mName').value = ''; $('#mPortion').value = '一份';
+    $('#mName').value = ''; $('#mPortion').value = '100';
     pendingPhoto.manual = '';
     // 清空手动输入区照片预览
     const prev = $('#manualPhotoPreview'); if (prev) prev.innerHTML = '';
     const btn = $('#manualPhotoBtn'); if (btn) { btn.classList.remove('has-photo'); btn.textContent = '📷 拍食物照'; }
-    toast(`已加入：${name} ${portion}${item.photo ? ' 📷' : ''}`);
+    toast(`已加入：${name} ${est.grams}克 ≈ ${est.kcal}千卡${item.photo ? ' 📷' : ''}`);
     renderBasket(); renderFab();
   },
   commitBasket() {
@@ -1045,7 +1287,7 @@ const ACTIONS = {
   removeFoodPhoto() {
     pendingPhoto.food = '';
     const prev = $('#foodPhotoPreview'); if (prev) prev.innerHTML = '';
-    const btn = $('#foodPhotoBtn'); if (btn) { btn.classList.remove('has-photo'); btn.textContent = '📷 先拍照再选分量'; }
+    const btn = $('#foodPhotoBtn'); if (btn) { btn.classList.remove('has-photo'); btn.textContent = '📷 先拍照再选克数'; }
   },
   /* 在手动输入区拍照 */
   takeManualPhoto() {
@@ -1086,6 +1328,74 @@ const ACTIONS = {
       render();
     });
   },
+  /* === AI 拍照识别：拍照 → AI 看照片 → 确认克数 → 加入待记入 === */
+  aiPhoto() {
+    if (!String(state.settings.aiKey || '').trim()) { aiSetupModal(); return; }
+    takePhoto(async (dataUrl) => {
+      if (!dataUrl) return;
+      openModal(`<h3>🤖 正在识别…</h3>
+        <img class="ai-photo" src="${dataUrl}" alt="食物照片">
+        <p class="muted small" style="text-align:center">AI 正在看这张照片，约需 3~10 秒…</p>
+        <div class="ai-spinner"></div>`);
+      try {
+        const result = await aiRecognizeFood(dataUrl);
+        const items = (result && result.items) || [];
+        if (!items.length) {
+          openModal(`<h3>🤖 没识别到食物</h3>
+            <img class="ai-photo" src="${dataUrl}" alt="食物照片">
+            <p class="muted small">${esc((result && result.note) || '换个角度、光线亮一点再试试。')}</p>
+            <div class="row" style="gap:8px;margin-top:12px">
+              <button class="btn line grow" data-action="aiPhoto">重拍</button>
+              <button class="btn grow" data-close>知道了</button>
+            </div>`);
+          return;
+        }
+        aiResultModal(dataUrl, items, (result && result.note) || '');
+      } catch (err) {
+        const msg = String((err && err.message) || err || '');
+        openModal(`<h3>⚠️ 识别失败</h3>
+          <p class="muted small">${esc(msg === 'NO_KEY' ? '还没有填写 API Key。' : msg)}</p>
+          <p class="muted small">请检查网络；若提示 Key 不正确，到「计划 → 设置 → 拍照识别」重新填写。</p>
+          <div class="row" style="gap:8px;margin-top:12px">
+            <button class="btn line grow" data-action="aiConfig">去设置</button>
+            <button class="btn grow" data-close>知道了</button>
+          </div>`);
+      }
+    });
+  },
+  /* 确认 AI 结果：读取用户核对后的克数，全部加入待记入 */
+  aiResultAdd() {
+    if (!_aiResult) return;
+    const { dataUrl, items } = _aiResult;
+    const added = [];
+    items.forEach((it, i) => {
+      const nameEl = document.querySelector('[data-ai-name="' + i + '"]');
+      const gramEl = document.querySelector('[data-ai-gram="' + i + '"]');
+      if (!nameEl || !gramEl) return;
+      const name = (nameEl.value || '').trim() || it.name || '未知食物';
+      const g = Math.max(1, Math.min(2000, Math.round(+(gramEl.value || 0))));
+      const og = Math.max(1, Math.round(+(it.grams || 100)));
+      const ratio = g / og;  // 用户改过克数就按比例折算热量
+      added.push({
+        name,
+        grams: g,
+        portion: g + '克',
+        kcal: Math.round((+it.kcal || 0) * ratio),
+        protein: round1((+it.protein || 0) * ratio),
+        photo: i === 0 ? dataUrl : undefined
+      });
+    });
+    if (!added.length) { toast('没有可加入的条目'); return; }
+    added.forEach((it) => logState.basket.push(it));
+    const total = Math.round(added.reduce((a, b) => a + b.kcal, 0));
+    _aiResult = null;
+    closeModal();
+    toast(`已加入 ${added.length} 样，约 ${total} 千卡 ✓`);
+    renderBasket(); renderFab();
+  },
+  /* 跳到设置页的 AI 配置区 */
+  aiConfig() { closeModal(); planTab = 'settings'; go('plan'); },
+
   /* 查看大图（食物/体重/运动照片通用） */
   viewPhoto(el) {
     if (!el || !el.src) return;
@@ -1095,16 +1405,18 @@ const ACTIONS = {
   /* === 语音 ACTIONS === */
   /* 记餐页语音输入：识别"米饭一碗"等口语，自动填入 mName / mPortion */
   voiceInput() {
-    if (!supportsSpeechRec()) { toast('当前浏览器不支持语音输入'); return; }
+    if (!supportsSpeechRec()) { toast('当前环境不支持语音输入'); return; }
     const btn = $('#voiceBtn');
-    if (btn) { btn.classList.add('recording'); btn.textContent = '🎙️ 录音中…'; }
+    if (btn) { btn.classList.add('recording'); btn.textContent = '🎙️ 请说话…'; }
     startVoiceRec((text) => {
-      const { name, portion } = parseVoiceInput(text);
+      const r = parseVoiceInput(text);
       const nameInput = $('#mName');
-      const portionInput = $('#mPortion');
-      if (nameInput && name) nameInput.value = name;
-      if (portionInput && portion) portionInput.value = portion;
-      toast(`识别：${name || '未识别'} ${portion}`);
+      const gramInput = $('#mPortion');
+      if (nameInput && r.name) nameInput.value = r.name;
+      if (gramInput && r.grams > 0) gramInput.value = r.grams;
+      const catSel = $('#mCat');
+      if (catSel && r.cat) catSel.value = r.cat;
+      toast(r.grams > 0 ? `识别：${r.name || '未识别'} ${r.grams}克` : `识别：${r.name || '未识别'}（请手动填克数）`);
     }, () => {
       if (btn) { btn.classList.remove('recording'); btn.textContent = '🎤 语音输入'; }
     });

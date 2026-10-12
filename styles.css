@@ -454,3 +454,36 @@ body.has-fab .toast { bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom)
   margin-left: 6px; font-size: 14px; background: transparent; border: 1px solid var(--line);
   border-radius: 12px; padding: 2px 8px; cursor: pointer;
 }
+
+/* ===== v2 新增：AI 拍照识别 ===== */
+.ai-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  border: 1.5px dashed var(--primary); background: var(--primary-soft);
+  color: var(--primary-2); border-radius: 12px; padding: 10px 12px;
+  font-size: 15px; font-weight: 700; cursor: pointer;
+}
+.ai-btn:active { transform: scale(0.98); background: var(--primary); color: var(--on-primary); }
+
+/* 结果/加载弹窗里的照片 */
+.ai-photo {
+  display: block; width: 100%; max-height: 170px; object-fit: cover;
+  border-radius: 12px; margin: 8px 0; border: 1.5px solid var(--line);
+}
+
+/* 识别结果列表（克数可改） */
+.ai-items { max-height: 40vh; overflow-y: auto; margin-top: 4px; }
+.ai-item { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.ai-item:last-child { border-bottom: 0; }
+.ai-item .input { min-height: 38px; }
+
+/* 识别中的转圈 */
+.ai-spinner {
+  width: 26px; height: 26px; margin: 6px auto 2px;
+  border: 3px solid var(--line); border-top-color: var(--primary);
+  border-radius: 50%; animation: ai-spin 0.8s linear infinite;
+}
+@keyframes ai-spin { to { transform: rotate(360deg); } }
+
+/* 克数选择按钮组（沿用 .unit-grid 外观，这里加一点强调） */
+.unit-grid button { font-variant-numeric: tabular-nums; }
+
