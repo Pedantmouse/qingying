@@ -1,5 +1,5 @@
 /* 轻盈计划 Service Worker：离线缓存应用文件 */
-const CACHE = 'qingying-v1';
+const CACHE = 'qingying-v2';
 const ASSETS = [
   './',
   './index.html',

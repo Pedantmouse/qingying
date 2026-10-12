@@ -19,6 +19,132 @@ const toMin = (hhmm) => { const [h, m] = String(hhmm || '0:0').split(':').map(Nu
 const slotName = (key) => (MEAL_SLOTS.find((s) => s.key === key) || {}).name || '';
 const dayLabel = (k) => (k === dateKey() ? '今天' : k === addDays(dateKey(), -1) ? '昨天' : fmtMD(k));
 
+/* ---------- 拍照 / 语音 / 播报 工具函数 ---------- */
+const supportsCamera = () => !!document.getElementById('cameraInput');
+const supportsSpeechRec = () => !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+const supportsSpeechSyn = () => typeof window.speechSynthesis !== 'undefined' && typeof window.SpeechSynthesisUtterance !== 'undefined';
+
+/* 压缩图片为 base64（最大宽度 800px、JPEG 0.7），单张约 30-100KB */
+function compressImage(file, maxSize = 800, quality = 0.7) {
+  return new Promise((resolve, reject) => {
+    if (!file || !/image\//.test(file.type)) { reject(new Error('not image')); return; }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('read fail'));
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('img fail'));
+      img.onload = () => {
+        let w = img.width, h = img.height;
+        if (w > maxSize) { h = Math.round(h * maxSize / w); w = maxSize; }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        try { resolve(canvas.toDataURL('image/jpeg', quality)); }
+        catch (err) { reject(err); }
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/* 统一拍照入口：调用 #cameraInput 文件选择器，回调返回压缩后 base64
+ * 用途：避免在每处都写 <input>，复用同一 input 元素
+ * 调用方式：takePhoto((b64) => { ... }) */
+let _cameraCb = null;
+function takePhoto(cb) {
+  const input = document.getElementById('cameraInput');
+  if (!input) { toast('当前浏览器不支持拍照'); return; }
+  _cameraCb = cb;
+  input.value = '';
+  input.click();
+}
+document.getElementById('cameraInput')?.addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) { _cameraCb = null; return; }
+  try {
+    const b64 = await compressImage(file);
+    if (_cameraCb) _cameraCb(b64);
+  } catch (err) { toast('拍照处理失败，请重试'); }
+  _cameraCb = null;
+});
+
+/* 全屏照片查看器 */
+function viewPhoto(b64, alt) {
+  const v = document.getElementById('photoViewer');
+  if (!v) return;
+  v.innerHTML = `<button class="pv-close" data-close-viewer aria-label="关闭">✕</button><img src="${b64}" alt="${esc(alt || '照片')}">`;
+  v.hidden = false;
+}
+function closePhotoViewer() {
+  const v = document.getElementById('photoViewer');
+  if (v) { v.hidden = true; v.innerHTML = ''; }
+}
+
+/* 语音输入：解析中文口语 "米饭一碗" -> {name, portion, cat?}
+ * 最长食物名优先匹配；分量用正则提取，复用 parsePortion 的 unit 关键字 */
+function parseVoiceInput(text) {
+  const t = String(text || '').replace(/\s+/g, '').trim();
+  if (!t) return { name: '', portion: '一份' };
+  let bestName = '', bestCat = '', bestLen = 0;
+  FOOD_CATEGORIES.forEach((c) => (FOODS[c.key] || []).forEach((f) => {
+    const n = f.name.replace(/\(.*?\)/g, '');
+    if (n.length >= 2 && t.indexOf(n) >= 0 && n.length > bestLen) {
+      bestName = n; bestCat = c.key; bestLen = n.length;
+    }
+  }));
+  // 提取分量："半碗"、"一碗"、"二两"、"半盘"、"一个"、"一盘" 等
+  let portion = '一份';
+  if (bestName) {
+    const idx = t.indexOf(bestName);
+    const rest = t.slice(0, idx) + t.slice(idx + bestName.length);
+    const m = rest.match(/[半一二两俩三四五六七八九十\d.]+\s*[碗盘份个根杯盒块片勺把只串瓶罐条张口点斤两]/);
+    if (m) portion = m[0];
+  } else if (t.length <= 8) {
+    // 没匹配到食物库，整个串当作食物名（截断）
+    bestName = t.slice(0, 12);
+  }
+  return { name: bestName, portion, cat: bestCat };
+}
+
+/* 启动一次语音识别，识别成功后回调 text */
+let _recognition = null;
+function startVoiceRec(onResult, onEnd) {
+  const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Rec) { toast('当前浏览器不支持语音输入（建议用 Chrome）'); onEnd && onEnd(); return; }
+  if (_recognition) { try { _recognition.stop(); } catch (e) {} _recognition = null; }
+  const r = new Rec();
+  r.lang = 'zh-CN'; r.continuous = false; r.interimResults = false; r.maxAlternatives = 1;
+  r.onresult = (e) => {
+    const text = e.results && e.results[0] && e.results[0][0] && e.results[0][0].transcript || '';
+    onResult && onResult(text);
+  };
+  r.onerror = (e) => {
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') toast('请允许麦克风权限');
+    else if (e.error === 'no-speech') toast('没听到声音，请重试');
+    else if (e.error === 'network') toast('语音识别需要网络');
+  };
+  r.onend = () => { _recognition = null; onEnd && onEnd(); };
+  _recognition = r;
+  try { r.start(); } catch (e) { toast('无法启动语音'); onEnd && onEnd(); }
+}
+function stopVoiceRec() {
+  if (_recognition) { try { _recognition.stop(); } catch (e) {} _recognition = null; }
+}
+
+/* 语音播报 */
+function speak(text, opts) {
+  if (!supportsSpeechSyn()) { toast('当前浏览器不支持语音播报'); return; }
+  window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'zh-CN'; u.rate = (opts && opts.rate) || 1.0; u.pitch = 1.0; u.volume = 1.0;
+  window.speechSynthesis.speak(u);
+}
+function stopSpeak() {
+  if (supportsSpeechSyn()) window.speechSynthesis.cancel();
+}
+
 /* ---------- 数据 ---------- */
 const DEFAULT_SETTINGS = {
   sex: 'female', age: 46, height: 161, weight: 111, goalWeight: 104,
@@ -36,6 +162,30 @@ function normalize(s) {
     weights: Array.isArray(s.weights) ? s.weights.filter((w) => w && /^\d{4}-\d{2}-\d{2}$/.test(w.date) && +w.jin > 0) : []
   };
 }
+/* 工具：清理单个 day 对象，确保 meals 结构正确并保留可选 photo/workoutPhoto 字段 */
+function normalizeDay(d) {
+  d = d && typeof d === 'object' ? d : {};
+  d.meals = d.meals || {};
+  MEAL_SLOTS.forEach((s) => { if (!Array.isArray(d.meals[s.key])) d.meals[s.key] = []; });
+  // 每个 item 保留可选 photo 字段（base64 字符串）
+  ['breakfast', 'lunch', 'dinner', 'snack'].forEach((slot) => {
+    d.meals[slot] = (d.meals[slot] || []).map((it) => {
+      if (!it || typeof it !== 'object') return null;
+      const o = { id: it.id || uid(), name: it.name || '未知', portion: it.portion || '一份', kcal: +it.kcal || 0, protein: +it.protein || 0 };
+      if (it.plan) o.plan = true;
+      if (it.manual) o.manual = true;
+      if (typeof it.photo === 'string' && it.photo) o.photo = it.photo;
+      return o;
+    }).filter(Boolean);
+  });
+  if (typeof d.water !== 'number') d.water = 0;
+  if (typeof d.workout !== 'boolean') d.workout = false;
+  d.dismissed = d.dismissed || {};
+  d.notified = d.notified || {};
+  // workoutPhoto 是可选字符串
+  if (typeof d.workoutPhoto !== 'string') delete d.workoutPhoto;
+  return d;
+}
 function load() {
   try { const raw = localStorage.getItem(STORE_KEY); if (raw) return normalize(JSON.parse(raw)); } catch (e) { /* 数据损坏时使用默认值 */ }
   return normalize({});
@@ -51,8 +201,8 @@ function getDay(k, create) {
     d = { meals: {}, water: 0, workout: false };
     if (create) state.days[k] = d;
   }
-  d.meals = d.meals || {};
-  MEAL_SLOTS.forEach((s) => { if (!Array.isArray(d.meals[s.key])) d.meals[s.key] = []; });
+  d = normalizeDay(d);
+  if (create) state.days[k] = d;
   return d;
 }
 function dayTotals(k) {
@@ -197,8 +347,13 @@ function renderToday() {
 
   $('#page-today').innerHTML = `
     <div class="hello">
-      <h1>${hello} 👋</h1>
-      <p class="muted">${now.getMonth() + 1}月${now.getDate()}日 ${WEEKDAY_NAMES[wd]} · 今天是「${w.title}」日</p>
+      <div class="row between" style="align-items:flex-start">
+        <div>
+          <h1>${hello} 👋</h1>
+          <p class="muted">${now.getMonth() + 1}月${now.getDate()}日 ${WEEKDAY_NAMES[wd]} · 今天是「${w.title}」日</p>
+        </div>
+        ${supportsSpeechSyn() ? `<button class="speak-btn" data-action="speakToday" aria-label="语音播报今日情况">🔊 播报</button>` : ''}
+      </div>
     </div>
 
     <div class="card">
@@ -240,7 +395,11 @@ function renderToday() {
       <h2>${w.icon} 今日运动：${w.title} <span class="tag">${w.time}</span></h2>
       ${workoutList(w)}
       <p class="muted small" style="margin:8px 0">${esc(w.note)}</p>
-      <button class="btn block ${day.workout ? 'ghost' : ''}" data-action="toggleWorkout">${day.workout ? '🎉 已完成（点此撤销）' : '✅ 完成今日运动'}</button>
+      ${day.workout && day.workoutPhoto ? `<img class="workout-photo" src="${day.workoutPhoto}" alt="运动打卡照" data-action="viewPhoto">` : ''}
+      <div class="row" style="gap:8px;margin-top:6px">
+        <button class="btn grow ${day.workout ? 'ghost' : ''}" data-action="toggleWorkout">${day.workout ? '🎉 已完成（点此撤销）' : '✅ 完成今日运动'}</button>
+        ${supportsCamera() ? `<button class="btn line grow" data-action="takeWorkoutPhoto">${day.workoutPhoto ? '📷 换张照片' : '📷 拍照打卡'}</button>` : ''}
+      </div>
     </div>
 
     <div class="card">
@@ -279,24 +438,29 @@ function addPlanMeal(slot, k = dateKey()) {
 
 function weighModal() {
   const latest = currentWeightJin();
+  const hasCam = supportsCamera();
   openModal(`
     <h3>⚖️ 记录今天的体重</h3>
     <label class="field">体重（斤）
       <input class="input" id="wInput" type="number" inputmode="decimal" step="0.1" min="50" max="400" value="${latest}">
     </label>
+    <div id="weightPhotoPreview" class="photo-preview"></div>
     <p class="muted small">建议每天早上起床、上完厕所、吃早饭前称。</p>
-    <div class="row" style="margin-top:12px">
+    <div class="row" style="gap:8px;margin-top:12px">
       <button class="btn line grow" data-close>取消</button>
-      <button class="btn grow" data-action="saveWeightModal">保存</button>
+      <button class="btn line grow" data-action="saveWeightModal">保存</button>
+      ${hasCam ? `<button class="btn ghost grow" data-action="takeWeightPhoto">📷 拍体重秤</button>` : ''}
     </div>`);
 }
-function addWeight(k, jin) {
+function addWeight(k, jin, photo) {
   jin = round1(+jin);
   if (!(jin >= 50 && jin <= 400)) { toast('请输入正确的体重（斤）'); return false; }
   state.weights = state.weights.filter((w) => w.date !== k);
-  state.weights.push({ date: k, jin });
+  const w = { date: k, jin };
+  if (typeof photo === 'string' && photo) w.photo = photo;
+  state.weights.push(w);
   save();
-  toast(`已记录：${jin} 斤`);
+  toast(`已记录：${jin} 斤${photo ? '（含照片）' : ''}`);
   return true;
 }
 
@@ -310,6 +474,10 @@ function defaultSlot() {
   return 'snack';
 }
 const logState = { date: dateKey(), slot: defaultSlot(), cat: 'staple', search: '', basket: [] };
+/* pendingPhoto：手动输入区或 pickFood 模态框中临时存放的拍照 base64
+ * - manualPhoto：手动输入区拍的，附加到下一条 basket item
+ * - foodPhoto：pickFood 模态框拍的，附加到下一条 pickUnit 添加的 basket item */
+const pendingPhoto = { manual: '', food: '', weight: '' };
 
 function renderLog() {
   const L = logState;
@@ -335,6 +503,10 @@ function renderLog() {
     <div class="card">
       <h3>✍️ 没找到？手动输入</h3>
       <div class="setting-group">
+        <div class="row" style="gap:8px;margin-bottom:8px">
+          ${supportsSpeechRec() ? `<button class="voice-btn grow" data-action="voiceInput" id="voiceBtn">🎤 语音输入</button>` : ''}
+          ${supportsCamera() ? `<button class="photo-btn grow" data-action="takeManualPhoto" id="manualPhotoBtn">📷 拍食物照</button>` : ''}
+        </div>
         <label class="field">吃了什么
           <input class="input" id="mName" placeholder="如：西红柿鸡蛋面" maxlength="30">
         </label>
@@ -349,6 +521,7 @@ function renderLog() {
             ${FOOD_CATEGORIES.map((c) => `<option value="${c.key}">${c.icon} ${c.name}</option>`).join('')}
           </select>
         </label>
+        <div id="manualPhotoPreview" class="photo-preview"></div>
         <button class="btn ghost block" data-action="manualAdd">＋ 加入待记入</button>
       </div>
     </div>
@@ -381,11 +554,14 @@ function renderFoodArea() {
 
 function pickFood(cat, i) {
   const f = FOODS[cat][i];
+  const hasCam = supportsCamera();
   openModal(`
     <h3>${f.icon} ${esc(f.name)} · 吃了多少？</h3>
     <div class="unit-grid">
       ${f.units.map((u, j) => `<button data-action="pickUnit" data-cat="${cat}" data-i="${i}" data-j="${j}">${esc(u[0])}</button>`).join('')}
     </div>
+    <div id="foodPhotoPreview" class="photo-preview"></div>
+    ${hasCam ? `<button class="photo-btn block" data-action="takeFoodPhoto" id="foodPhotoBtn" data-cat="${cat}" data-i="${i}" style="margin-top:8px">📷 先拍照再选分量</button>` : ''}
     <p class="muted small" style="margin-top:12px">点一下就加入；吃了两份就点两次。</p>
     <button class="btn line block" data-close style="margin-top:6px">完成</button>`);
 }
@@ -430,7 +606,8 @@ function renderLogged() {
     : '<div class="empty">还没有记录</div>';
 }
 function itemRow(it, k, slot) {
-  return `<li><span class="i-name">${esc(it.name)}</span><span class="i-sub">${esc(it.portion)} · ${Math.round(it.kcal)}千卡</span>
+  const photo = (it && typeof it.photo === 'string' && it.photo) ? `<img class="i-photo" src="${it.photo}" alt="${esc(it.name)}" data-action="viewPhoto">` : '';
+  return `<li>${photo}<span class="i-name">${esc(it.name)}</span><span class="i-sub">${esc(it.portion)} · ${Math.round(it.kcal)}千卡</span>
     <button class="icon-btn" data-action="delItem" data-k="${k}" data-slot="${slot}" data-id="${esc(it.id)}" aria-label="删除">🗑️</button></li>`;
 }
 
@@ -510,7 +687,7 @@ function renderRecords() {
       <h2>📉 体重趋势 <span class="muted small">近30次</span></h2>
       ${weightChart(ws.slice(-30), goal)}
       ${ws.length ? `<details style="margin-top:8px"><summary class="muted small">查看/删除体重记录</summary>
-        <ul class="items">${ws.slice().reverse().slice(0, 60).map((w) => `<li><span class="i-name">${fmtMD(w.date)}</span><span class="i-sub">${w.jin} 斤</span>
+        <ul class="items">${ws.slice().reverse().slice(0, 60).map((w) => `<li>${w.photo ? `<img class="i-photo" src="${w.photo}" alt="体重秤照片" data-action="viewPhoto">` : ''}<span class="i-name">${fmtMD(w.date)}</span><span class="i-sub">${w.jin} 斤</span>
           <button class="icon-btn" data-action="delWeight" data-date="${w.date}" aria-label="删除">🗑️</button></li>`).join('')}</ul></details>` : ''}
     </div>
 
@@ -742,7 +919,13 @@ const ACTIONS = {
     render();
   },
   weighModal() { weighModal(); },
-  saveWeightModal() { if (addWeight(dateKey(), $('#wInput').value)) { closeModal(); render(); } },
+  saveWeightModal() {
+    const photo = pendingPhoto.weight || '';
+    if (addWeight(dateKey(), $('#wInput').value, photo)) {
+      pendingPhoto.weight = '';
+      closeModal(); render();
+    }
+  },
   addWater() {
     const day = getDay(dateKey(), true);
     if (day.water >= WATER_GOAL) { toast('今天8杯水已喝够，真棒！'); return; }
@@ -764,8 +947,14 @@ const ACTIONS = {
   pickUnit(el) {
     const f = FOODS[el.dataset.cat][+el.dataset.i];
     const u = f.units[+el.dataset.j];
-    logState.basket.push({ name: f.name, portion: u[0], kcal: u[1], protein: u[2] });
-    toast(`已加入：${f.name} ${u[0]}`);
+    const item = { name: f.name, portion: u[0], kcal: u[1], protein: u[2] };
+    if (pendingPhoto.food) { item.photo = pendingPhoto.food; }
+    logState.basket.push(item);
+    toast(`已加入：${f.name} ${u[0]}${pendingPhoto.food ? ' 📷' : ''}`);
+    pendingPhoto.food = '';
+    // 同步更新模态框中的预览
+    const prev = $('#foodPhotoPreview'); if (prev) prev.innerHTML = '';
+    const btn = $('#foodPhotoBtn'); if (btn) { btn.classList.remove('has-photo'); btn.textContent = '📷 先拍照再选分量'; }
     renderBasket(); renderFab();
   },
   basketDel(el) { logState.basket.splice(+el.dataset.idx, 1); renderBasket(); renderFab(); },
@@ -775,9 +964,15 @@ const ACTIONS = {
     const portion = $('#mPortion').value.trim() || '一份';
     if (!name) { toast('请先写上吃了什么'); $('#mName').focus(); return; }
     const est = estimateManual(name, portion, $('#mCat').value);
-    logState.basket.push({ name, portion, kcal: est.kcal, protein: est.protein, manual: true });
+    const item = { name, portion, kcal: est.kcal, protein: est.protein, manual: true };
+    if (pendingPhoto.manual) item.photo = pendingPhoto.manual;
+    logState.basket.push(item);
     $('#mName').value = ''; $('#mPortion').value = '一份';
-    toast(`已加入：${name} ${portion}`);
+    pendingPhoto.manual = '';
+    // 清空手动输入区照片预览
+    const prev = $('#manualPhotoPreview'); if (prev) prev.innerHTML = '';
+    const btn = $('#manualPhotoBtn'); if (btn) { btn.classList.remove('has-photo'); btn.textContent = '📷 拍食物照'; }
+    toast(`已加入：${name} ${portion}${item.photo ? ' 📷' : ''}`);
     renderBasket(); renderFab();
   },
   commitBasket() {
@@ -834,11 +1029,113 @@ const ACTIONS = {
     const settings = state.settings;
     state = normalize({ settings }); save(); toast('已清空记录（个人设置已保留）'); render();
   },
-  installApp() { promptInstall(); }
+  installApp() { promptInstall(); },
+
+  /* === 拍照 ACTIONS === */
+  /* 在 pickFood 模态框中拍照，存到 pendingPhoto.food，并显示预览 */
+  takeFoodPhoto(el) {
+    takePhoto((b64) => {
+      pendingPhoto.food = b64;
+      const prev = $('#foodPhotoPreview');
+      if (prev) prev.innerHTML = `<img src="${b64}" alt="食物照片"><button class="pp-remove" data-action="removeFoodPhoto" aria-label="移除照片">✕</button>`;
+      const btn = $('#foodPhotoBtn');
+      if (btn) { btn.classList.add('has-photo'); btn.textContent = '✓ 已拍照，将附加到下一条'; }
+    });
+  },
+  removeFoodPhoto() {
+    pendingPhoto.food = '';
+    const prev = $('#foodPhotoPreview'); if (prev) prev.innerHTML = '';
+    const btn = $('#foodPhotoBtn'); if (btn) { btn.classList.remove('has-photo'); btn.textContent = '📷 先拍照再选分量'; }
+  },
+  /* 在手动输入区拍照 */
+  takeManualPhoto() {
+    takePhoto((b64) => {
+      pendingPhoto.manual = b64;
+      const prev = $('#manualPhotoPreview');
+      if (prev) prev.innerHTML = `<img src="${b64}" alt="食物照片"><button class="pp-remove" data-action="removeManualPhoto" aria-label="移除照片">✕</button>`;
+      const btn = $('#manualPhotoBtn');
+      if (btn) { btn.classList.add('has-photo'); btn.textContent = '✓ 已拍照，将附加到下一条'; }
+    });
+  },
+  removeManualPhoto() {
+    pendingPhoto.manual = '';
+    const prev = $('#manualPhotoPreview'); if (prev) prev.innerHTML = '';
+    const btn = $('#manualPhotoBtn'); if (btn) { btn.classList.remove('has-photo'); btn.textContent = '📷 拍食物照'; }
+  },
+  /* 在体重模态框中拍体重秤 */
+  takeWeightPhoto() {
+    takePhoto((b64) => {
+      pendingPhoto.weight = b64;
+      const prev = $('#weightPhotoPreview');
+      if (prev) prev.innerHTML = `<img src="${b64}" alt="体重秤照片"><button class="pp-remove" data-action="removeWeightPhoto" aria-label="移除照片">✕</button>`;
+    });
+  },
+  removeWeightPhoto() {
+    pendingPhoto.weight = '';
+    const prev = $('#weightPhotoPreview'); if (prev) prev.innerHTML = '';
+  },
+  /* 运动打卡拍照（在今日运动卡片） */
+  takeWorkoutPhoto() {
+    takePhoto((b64) => {
+      const day = getDay(dateKey(), true);
+      day.workoutPhoto = b64;
+      // 自动把今日运动标记为已完成
+      if (!day.workout) day.workout = true;
+      save();
+      toast('运动打卡照片已保存 🎉');
+      render();
+    });
+  },
+  /* 查看大图（食物/体重/运动照片通用） */
+  viewPhoto(el) {
+    if (!el || !el.src) return;
+    viewPhoto(el.src, el.alt);
+  },
+
+  /* === 语音 ACTIONS === */
+  /* 记餐页语音输入：识别"米饭一碗"等口语，自动填入 mName / mPortion */
+  voiceInput() {
+    if (!supportsSpeechRec()) { toast('当前浏览器不支持语音输入'); return; }
+    const btn = $('#voiceBtn');
+    if (btn) { btn.classList.add('recording'); btn.textContent = '🎙️ 录音中…'; }
+    startVoiceRec((text) => {
+      const { name, portion } = parseVoiceInput(text);
+      const nameInput = $('#mName');
+      const portionInput = $('#mPortion');
+      if (nameInput && name) nameInput.value = name;
+      if (portionInput && portion) portionInput.value = portion;
+      toast(`识别：${name || '未识别'} ${portion}`);
+    }, () => {
+      if (btn) { btn.classList.remove('recording'); btn.textContent = '🎤 语音输入'; }
+    });
+  },
+  /* 今日页语音播报 */
+  speakToday() {
+    const k = dateKey();
+    const day = getDay(k);
+    const tot = dayTotals(k);
+    const target = calcTarget();
+    const pTarget = proteinTarget();
+    const todayWeight = state.weights.find((x) => x.date === k);
+    const wd = new Date().getDay();
+    const w = WORKOUTS[wd] || {};
+    const parts = [];
+    parts.push(`今天是${WEEKDAY_NAMES[wd]}，今日运动是${w.title || '休息'}。`);
+    parts.push(`今天已经吃了${tot.kcal}千卡，目标${target}千卡，${tot.kcal > target ? `已超出${tot.kcal - target}千卡` : `还可以吃${target - tot.kcal}千卡`}。`);
+    parts.push(`蛋白质${tot.protein}克，目标${pTarget}克。`);
+    if (todayWeight) parts.push(`今日体重${todayWeight.jin}斤。`);
+    parts.push(`已喝${day.water}杯水。`);
+    if (day.workout) parts.push('今日运动已完成，真棒！');
+    else parts.push('今日运动还没打卡。');
+    speak(parts.join(''));
+    toast('开始语音播报…');
+  }
 };
 
 document.addEventListener('click', (e) => {
   if (e.target.closest('[data-close]')) { closeModal(); return; }
+  // 点击照片查看器关闭按钮或背景关闭
+  if (e.target.closest('[data-close-viewer]') || e.target.id === 'photoViewer') { closePhotoViewer(); return; }
   const nav = e.target.closest('[data-go]');
   if (nav) { go(nav.dataset.go); return; }
   const el = e.target.closest('[data-action]');
@@ -889,7 +1186,7 @@ document.addEventListener('change', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeModal();
+  if (e.key === 'Escape') { closePhotoViewer(); closeModal(); }
   if (e.key === 'Enter' && e.target.id === 'wInput') ACTIONS.saveWeightModal();
 });
 
@@ -929,4 +1226,13 @@ if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js').catch(() => {}); });
 }
 
-go('today');
+/* 支持 manifest shortcuts 通过 ?page=xxx 直接打开对应页面 */
+(function () {
+  const params = new URLSearchParams(location.search);
+  const page = params.get('page');
+  if (page && ['today', 'log', 'records', 'plan'].indexOf(page) >= 0) {
+    go(page);
+  } else {
+    go('today');
+  }
+})();

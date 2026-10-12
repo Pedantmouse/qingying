@@ -1,21 +1,46 @@
 {
   "name": "轻盈计划",
   "short_name": "轻盈计划",
-  "description": "中式家常减脂餐 + 居家运动 + 体重记录，帮你轻松增肌减脂",
+  "description": "中式家常减脂餐 + 居家运动 + 体重记录，支持拍照与语音，帮你轻松增肌减脂",
   "id": "./",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
   "orientation": "portrait",
   "lang": "zh-CN",
   "dir": "ltr",
   "theme_color": "#2fa866",
   "background_color": "#f4faf6",
   "categories": ["health", "fitness", "lifestyle"],
+  "prefer_related_applications": false,
   "icons": [
     { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
     { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
     { "src": "icons/maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
     { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    {
+      "name": "记一餐",
+      "short_name": "记餐",
+      "description": "快速打开记餐页",
+      "url": "./index.html?page=log",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "记体重",
+      "short_name": "体重",
+      "description": "快速记录今日体重",
+      "url": "./index.html?page=records",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "今日打卡",
+      "short_name": "今日",
+      "description": "查看今日热量和打卡",
+      "url": "./index.html?page=today",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
+    }
   ]
 }
