@@ -66,13 +66,6 @@ Since v2.0 you can point the camera at a meal, and the app sends the photo to a 
 returns the **food name, estimated weight in grams, calories and protein**. You can then adjust the
 grams and the calories are recalculated proportionally before you save the entry.
 
-- A free AI vision model is used by default, at no cost for everyday use
-- **You need your own API key.** Register at [open.bigmodel.cn](https://open.bigmodel.cn) (free tier),
-  create an API key, and paste it into the app under **Plan → Settings → Photo recognition**
-- The endpoint URL and model name are configurable in the same screen, so any OpenAI-compatible
-  vision API can be used instead
-- Without a key, the app shows a short setup guide and everything else keeps working normally
-
 > The photo is only sent when you tap the recognition button. Nothing is uploaded in the background.
 
 ## Camera & voice input
@@ -187,8 +180,7 @@ On Android Chrome you can then use **Add to Home screen** to install it like a n
   `localStorage`. There is no account, no server, no analytics and no telemetry.
 - Photos are compressed locally (max width 800 px, JPEG quality 0.7) and never leave the device,
   except the one photo you explicitly submit for AI recognition.
-- Your AI API key is stored in `localStorage` on your own device and is sent only to the endpoint you
-  configure.
+- Nothing else leaves your device unless you explicitly tap a button that requires it.
 
 ---
 
